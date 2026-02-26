@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+/* stylelint-disable-next-line at-rule-no-unknown */
+@custom-variant dark (&:where(.dark, .dark *));
+
+html.dark,
+html.dark body {
+  background-color: #18181b; /* zinc-900 */
+  color: #f4f4f5; /* zinc-100 */
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #d4d4d8;
+  border-radius: 9999px;
+}
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #52525b;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #a1a1aa;
+}
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #71717a;
+}
