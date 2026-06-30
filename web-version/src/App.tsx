@@ -1,7 +1,16 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Sun, Moon, Lightbulb, RefreshCw, Loader2, Delete, Compass, Target, Sparkles } from 'lucide-react';
+import { Sun, Moon, Lightbulb, RefreshCw, Loader2, Delete, Compass, Target, Sparkles, Palette } from 'lucide-react';
+import { computeFeedback, findWordsForPattern, type PatternState } from './wordle';
 
 type CellState = 'tbd' | 'absent' | 'present' | 'correct';
+type PaintState = 'blank' | 'absent' | 'present' | 'correct' | 'any';
+type AppMode = 'solve' | 'explore' | 'draw';
+
+interface DrawRowResult {
+  row: number;
+  words: string[];
+  selected: string;
+}
 
 interface Cell {
   letter: string;
@@ -34,7 +43,18 @@ export default function App() {
 
   const [filteredWords, setFilteredWords] = useState<string[] | null>(null);
   const [suggestion, setSuggestion] = useState('');
-  const [exploreMode, setExploreMode] = useState(false);
+  const [appMode, setAppMode] = useState<AppMode>('solve');
+
+  const createBlankDrawPattern = (len: number) =>
+    Array.from({ length: maxGuesses }, () =>
+      Array.from({ length: len }, () => 'blank' as PaintState)
+    );
+
+  const [solutionWord, setSolutionWord] = useState('');
+  const [drawPattern, setDrawPattern] = useState<PaintState[][]>(createBlankDrawPattern(5));
+  const [drawResults, setDrawResults] = useState<DrawRowResult[] | null>(null);
+  const [drawError, setDrawError] = useState('');
+  const [drawWarning, setDrawWarning] = useState('');
 
   useEffect(() => {
     if (darkMode) {
@@ -62,10 +82,14 @@ export default function App() {
     if (Number.isNaN(val) || val < 2 || val > 15) return;
     setWordLength(val);
     setGrid(createEmptyGrid(val));
+    setDrawPattern(createBlankDrawPattern(val));
     setCurrentRow(0);
     setCurrentCol(0);
     setFilteredWords(null);
     setSuggestion('');
+    setDrawResults(null);
+    setDrawError('');
+    setDrawWarning('');
   };
 
   const getFiltered = useCallback((currentGrid: Cell[][]) => {
@@ -190,17 +214,105 @@ export default function App() {
   }, [words, wordLength]);
 
   useEffect(() => {
-    if (words.length > 0) {
+    if (words.length > 0 && appMode !== 'draw') {
       const res = getFiltered(grid);
       setFilteredWords(res);
-      generateSuggestion(res, exploreMode, grid);
+      generateSuggestion(res, appMode === 'explore', grid);
     }
-  }, [grid, exploreMode, words, getFiltered, generateSuggestion]);
+  }, [grid, appMode, words, getFiltered, generateSuggestion]);
 
   const handleSuggestClick = () => {
     if (filteredWords !== null) {
-      generateSuggestion(filteredWords, exploreMode, grid);
+      generateSuggestion(filteredWords, appMode === 'explore', grid);
     }
+  };
+
+  const toggleDrawCell = (r: number, c: number) => {
+    const nextState: Record<PaintState, PaintState> = {
+      blank: 'correct',
+      correct: 'present',
+      present: 'any',
+      any: 'absent',
+      absent: 'blank',
+    };
+    const newPattern = drawPattern.map((row, ri) =>
+      ri === r ? row.map((cell, ci) => (ci === c ? nextState[cell] : cell)) : row
+    );
+    setDrawPattern(newPattern);
+    setDrawResults(null);
+    setDrawError('');
+    setDrawWarning('');
+  };
+
+  const generateDrawWords = () => {
+    const target = solutionWord.trim().toUpperCase();
+    if (target.length !== wordLength) {
+      setDrawError(`Enter a ${wordLength}-letter solution word.`);
+      setDrawResults(null);
+      setDrawWarning('');
+      return;
+    }
+    if (!/^[A-Z]+$/.test(target)) {
+      setDrawError('Solution word must contain only letters.');
+      setDrawResults(null);
+      setDrawWarning('');
+      return;
+    }
+
+    const dictionary = words.filter((w) => w.length === wordLength);
+    const results: DrawRowResult[] = [];
+
+    for (let r = 0; r < maxGuesses; r++) {
+      const row = drawPattern[r];
+      const hasPaint = row.some((cell) => cell !== 'blank');
+      if (!hasPaint) continue;
+
+      const pattern: PatternState[] = row.map((cell) => (cell === 'blank' ? 'absent' : cell));
+      const matches = findWordsForPattern(pattern, target, dictionary);
+      results.push({
+        row: r,
+        words: matches,
+        selected: matches[0] ?? '',
+      });
+    }
+
+    if (results.length === 0) {
+      setDrawError('Paint at least one row to generate words.');
+      setDrawResults(null);
+      setDrawWarning('');
+      return;
+    }
+
+    const paintedRows = drawPattern
+      .map((row, i) => (row.some((cell) => cell !== 'blank') ? i : -1))
+      .filter((i) => i >= 0);
+    const firstPainted = paintedRows[0];
+    const lastPainted = paintedRows[paintedRows.length - 1];
+    const gapCount = paintedRows.length > 0
+      ? lastPainted - firstPainted + 1 - paintedRows.length
+      : 0;
+
+    setDrawError('');
+    setDrawWarning(
+      gapCount > 0
+        ? `Rows ${firstPainted + 1}–${lastPainted + 1} must all be played in order — paint any skipped rows too.`
+        : ''
+    );
+    setDrawResults(results);
+  };
+
+  const selectDrawWord = (row: number, word: string) => {
+    setDrawResults((prev) =>
+      prev?.map((result) => (result.row === row ? { ...result, selected: word } : result)) ?? null
+    );
+  };
+
+  const handleDrawReset = () => {
+    setDrawPattern(createBlankDrawPattern(wordLength));
+    setSolutionWord('');
+    setDrawResults(null);
+    setDrawError('');
+    setDrawWarning('');
   };
 
   const onKeyPress = useCallback((key: string) => {
@@ -241,8 +353,9 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (appMode === 'draw') return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      
+
       if (e.key === 'Backspace') {
         onKeyPress('BACKSPACE');
       } else if (e.key === 'Enter') {
@@ -254,7 +367,7 @@ export default function App() {
 
     globalThis.addEventListener('keydown', handleKeyDown);
     return () => globalThis.removeEventListener('keydown', handleKeyDown);
-  }, [onKeyPress]);
+  }, [onKeyPress, appMode]);
 
   const toggleCellState = (r: number, c: number) => {
     if (r > currentRow || (r === currentRow && c >= currentCol)) return;
@@ -297,13 +410,25 @@ export default function App() {
     });
   });
 
-  const getBgColor = (state: CellState, isDark: boolean) => {
+  const getBgColor = (state: CellState | PaintState, isDark: boolean) => {
     switch (state) {
       case 'correct': return 'bg-emerald-500 text-white border-emerald-500';
       case 'present': return 'bg-amber-500 text-white border-amber-500';
       case 'absent': return isDark ? 'bg-zinc-700 text-white border-zinc-700' : 'bg-zinc-500 text-white border-zinc-500';
+      case 'any': return 'bg-violet-500 text-white border-violet-500';
+      case 'blank': return isDark ? 'bg-zinc-800/50 text-zinc-500 border-zinc-600 border-dashed' : 'bg-zinc-100 text-zinc-400 border-zinc-300 border-dashed';
       case 'tbd': return isDark ? 'bg-zinc-800 text-zinc-100 border-zinc-600' : 'bg-white text-zinc-900 border-zinc-300';
     }
+  };
+
+  const getDrawCellDisplay = (row: number, col: number, paint: PaintState): { color: CellState | PaintState; letter: string } => {
+    const result = drawResults?.find((r) => r.row === row);
+    const letter = result?.selected?.[col] ?? '';
+    if (result?.selected && paint === 'any') {
+      const feedback = computeFeedback(result.selected, solutionWord.toUpperCase());
+      return { color: feedback[col], letter };
+    }
+    return { color: paint, letter };
   };
 
   const getKeyBgColor = (state: CellState | undefined, isDark: boolean) => {
@@ -346,63 +471,196 @@ export default function App() {
             </div>
           ) : (
             <>
+              {appMode === 'draw' && (
+                <div className="w-full max-w-md mx-auto space-y-2">
+                  <label htmlFor="solution-word" className="block text-sm font-medium text-zinc-500">
+                    Solution word (the answer you already know)
+                  </label>
+                  <input
+                    id="solution-word"
+                    type="text"
+                    value={solutionWord}
+                    onChange={(e) => {
+                      setSolutionWord(e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, wordLength));
+                      setDrawResults(null);
+                      setDrawError('');
+                      setDrawWarning('');
+                    }}
+                    placeholder={`${wordLength}-letter word`}
+                    className="w-full p-3 text-center text-xl font-bold tracking-widest uppercase rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:border-emerald-500 outline-none"
+                  />
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 text-center">
+                    Click tiles to paint: green → yellow → any → gray → clear
+                  </p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 text-center">
+                    <span className="inline-block w-3 h-3 rounded-sm bg-violet-500 align-middle mr-1" />
+                    Any = green or yellow (more word options)
+                  </p>
+                </div>
+              )}
+
               <div className="flex-1 flex flex-col items-center justify-center gap-2">
-                {grid.map((row, rIndex) => (
-                  <div key={rowIds.current[rIndex]} className="flex gap-2">
-                    {row.map((cell, cIndex) => {
-                      const isActive = rIndex === currentRow && cIndex === currentCol;
-                      const isClickable = rIndex < currentRow || (rIndex === currentRow && cIndex < currentCol);
-                      
-                      return (
-                        <button
-                          type="button"
-                          key={`cell-${rIndex}-${cIndex}`}
-                          onClick={() => { if (isClickable) toggleCellState(rIndex, cIndex); }}
-                          disabled={!isClickable}
-                          className={`
-                            w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center text-2xl sm:text-3xl font-bold uppercase rounded-sm border-2 select-none transition-colors
-                            disabled:opacity-100 disabled:cursor-default
-                            ${getBgColor(cell.state, darkMode)}
-                            ${isActive ? 'border-zinc-500 dark:border-zinc-400 scale-105' : ''}
-                            ${isClickable ? 'cursor-pointer hover:opacity-80' : ''}
-                          `}
-                        >
-                          {cell.letter}
-                        </button>
-                      );
-                    })}
-                  </div>
-                ))}
+                {appMode === 'draw'
+                  ? drawPattern.map((row, rIndex) => (
+                      <div key={`draw-row-${rIndex}`} className="flex gap-2">
+                        {row.map((paint, cIndex) => {
+                          const { color, letter } = getDrawCellDisplay(rIndex, cIndex, paint);
+                          return (
+                            <button
+                              type="button"
+                              key={`draw-cell-${rIndex}-${cIndex}`}
+                              onClick={() => toggleDrawCell(rIndex, cIndex)}
+                              className={`
+                                w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center text-2xl sm:text-3xl font-bold uppercase rounded-sm border-2 select-none transition-colors
+                                cursor-pointer hover:opacity-80
+                                ${getBgColor(color, darkMode)}
+                              `}
+                            >
+                              {letter}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))
+                  : grid.map((row, rIndex) => (
+                      <div key={rowIds.current[rIndex]} className="flex gap-2">
+                        {row.map((cell, cIndex) => {
+                          const isActive = rIndex === currentRow && cIndex === currentCol;
+                          const isClickable = rIndex < currentRow || (rIndex === currentRow && cIndex < currentCol);
+
+                          return (
+                            <button
+                              type="button"
+                              key={`cell-${rIndex}-${cIndex}`}
+                              onClick={() => { if (isClickable) toggleCellState(rIndex, cIndex); }}
+                              disabled={!isClickable}
+                              className={`
+                                w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center text-2xl sm:text-3xl font-bold uppercase rounded-sm border-2 select-none transition-colors
+                                disabled:opacity-100 disabled:cursor-default
+                                ${getBgColor(cell.state, darkMode)}
+                                ${isActive ? 'border-zinc-500 dark:border-zinc-400 scale-105' : ''}
+                                ${isClickable ? 'cursor-pointer hover:opacity-80' : ''}
+                              `}
+                            >
+                              {cell.letter}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))}
               </div>
 
-              <div className="flex flex-col sm:flex-row gap-3 w-full max-w-md mx-auto mt-2">
-                <div className="flex bg-zinc-200 dark:bg-zinc-800 p-1 rounded-lg flex-1">
-                  <button 
-                    onClick={() => setExploreMode(false)}
-                    className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${exploreMode ? 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300' : 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-white'}`}
+              <div className="flex flex-col gap-3 w-full max-w-md mx-auto mt-2">
+                <div className="flex bg-zinc-200 dark:bg-zinc-800 p-1 rounded-lg">
+                  <button
+                    onClick={() => setAppMode('solve')}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-sm font-medium rounded-md transition-all ${appMode === 'solve' ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-white' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}
                   >
                     <Target size={16} /> Solve
                   </button>
-                  <button 
-                    onClick={() => setExploreMode(true)}
-                    className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${exploreMode ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-white' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}
+                  <button
+                    onClick={() => setAppMode('explore')}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-sm font-medium rounded-md transition-all ${appMode === 'explore' ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-white' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}
                   >
                     <Compass size={16} /> Explore
                   </button>
+                  <button
+                    onClick={() => setAppMode('draw')}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-sm font-medium rounded-md transition-all ${appMode === 'draw' ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-white' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}
+                  >
+                    <Palette size={16} /> Draw
+                  </button>
                 </div>
-                <button 
-                  onClick={handleSuggestClick}
-                  className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white py-2 px-4 rounded-lg font-medium transition-colors sm:w-auto w-full"
-                >
-                  <Sparkles size={18} /> Suggest
-                </button>
+
+                {appMode === 'draw' ? (
+                  <button
+                    onClick={generateDrawWords}
+                    className="flex items-center justify-center gap-2 bg-violet-500 hover:bg-violet-600 text-white py-2 px-4 rounded-lg font-medium transition-colors w-full"
+                  >
+                    <Sparkles size={18} /> Generate Words
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleSuggestClick}
+                    className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white py-2 px-4 rounded-lg font-medium transition-colors w-full"
+                  >
+                    <Sparkles size={18} /> Suggest
+                  </button>
+                )}
               </div>
 
-              {(filteredWords !== null || suggestion) && (
+              {appMode === 'draw' && (drawError || drawResults) && (
+                <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-700 p-4 space-y-3 w-full max-w-md mx-auto">
+                  <h2 className="text-sm font-bold text-zinc-500 uppercase tracking-wider">
+                    Words to Enter
+                  </h2>
+
+                  {drawError && (
+                    <p className="text-sm text-red-500 dark:text-red-400">{drawError}</p>
+                  )}
+
+                  {drawWarning && (
+                    <p className="text-sm text-amber-600 dark:text-amber-400">{drawWarning}</p>
+                  )}
+
+                  {drawResults?.map((result) => (
+                    <div key={result.row} className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-zinc-500">Row {result.row + 1}</span>
+                        {result.words.length === 0 ? (
+                          <span className="text-xs text-red-500">No valid words — adjust your pattern</span>
+                        ) : (
+                          <span className="text-xs text-zinc-500">{result.words.length} option{result.words.length !== 1 ? 's' : ''}</span>
+                        )}
+                      </div>
+
+                      {result.selected && (
+                        <div className="flex items-center gap-2">
+                          <p className="text-xl font-bold tracking-widest">{result.selected}</p>
+                          <div className="flex gap-1">
+                            {computeFeedback(result.selected, solutionWord.toUpperCase()).map((state, i) => (
+                              <span
+                                key={`preview-${result.row}-${i}`}
+                                className={`w-6 h-6 rounded-sm ${getBgColor(state, darkMode)}`}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {result.words.length > 1 && (
+                        <div className="max-h-16 overflow-y-auto custom-scrollbar">
+                          <div className="flex flex-wrap gap-1.5">
+                            {result.words.slice(0, 30).map((w) => (
+                              <button
+                                key={w}
+                                type="button"
+                                onClick={() => selectDrawWord(result.row, w)}
+                                className={`px-2 py-1 rounded text-xs font-mono border transition-colors ${
+                                  result.selected === w
+                                    ? 'bg-violet-500 text-white border-violet-500'
+                                    : 'bg-zinc-100 dark:bg-zinc-700/50 border-zinc-200 dark:border-zinc-600 hover:border-violet-400'
+                                }`}
+                              >
+                                {w}
+                              </button>
+                            ))}
+                            {result.words.length > 30 && (
+                              <span className="text-xs text-zinc-500 py-1">+{result.words.length - 30} more</span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {appMode !== 'draw' && (filteredWords !== null || suggestion) && (
                 <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-700 p-4 space-y-3 w-full max-w-md mx-auto">
                   <div className="flex justify-between items-center">
                     <h2 className="text-sm font-bold text-zinc-500 uppercase tracking-wider">
-                      {exploreMode ? 'Explore Suggestion' : 'Possible Words'}
+                      {appMode === 'explore' ? 'Explore Suggestion' : 'Possible Words'}
                     </h2>
                     <span className="text-xs font-medium bg-zinc-100 dark:bg-zinc-700 px-2 py-1 rounded">
                       {filteredWords?.length || 0} remaining
@@ -416,14 +674,14 @@ export default function App() {
                       </div>
                       <div className="flex-1">
                         <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                          {exploreMode ? 'Best Burner Word' : 'Best Suggestion'}
+                          {appMode === 'explore' ? 'Best Burner Word' : 'Best Suggestion'}
                         </p>
                         <p className="text-xl font-bold tracking-widest">{suggestion}</p>
                       </div>
                     </div>
                   )}
 
-                  {filteredWords && filteredWords.length > 0 && !exploreMode && (
+                  {filteredWords && filteredWords.length > 0 && appMode === 'solve' && (
                     <div className="max-h-24 overflow-y-auto custom-scrollbar mt-2">
                       <div className="flex flex-wrap gap-1.5">
                         {filteredWords.slice(0, 50).map(w => (
@@ -441,7 +699,7 @@ export default function App() {
               )}
 
               <div className="w-full max-w-md mx-auto space-y-2 pb-4">
-                {KEYBOARD_ROWS.map((row) => (
+                {appMode !== 'draw' && KEYBOARD_ROWS.map((row) => (
                   <div key={row[0]} className="flex justify-center gap-1 sm:gap-1.5">
                     {row.map(key => {
                       const isSpecial = key === 'ENTER' || key === 'BACKSPACE';
@@ -462,13 +720,13 @@ export default function App() {
                     })}
                   </div>
                 ))}
-                
+
                 <div className="flex justify-center pt-2">
-                  <button 
-                    onClick={handleReset}
+                  <button
+                    onClick={appMode === 'draw' ? handleDrawReset : handleReset}
                     className="flex items-center gap-2 px-4 py-2 rounded-lg bg-zinc-200 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-medium hover:bg-zinc-300 dark:hover:bg-zinc-700 transition-colors text-sm"
                   >
-                    <RefreshCw size={16} /> Reset Game
+                    <RefreshCw size={16} /> {appMode === 'draw' ? 'Reset Canvas' : 'Reset Game'}
                   </button>
                 </div>
               </div>
